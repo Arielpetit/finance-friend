@@ -1,0 +1,72 @@
+name: Section 5 - Security Anomaly Detection
+
+# AI-enhanced secret detection pipeline.
+# Stage 1: Gitleaks (deterministic regex/entropy engine)
+# Stage 2: filter_secrets.py (contextual ML classifier / false-positive filter)
+# See docs/secret-detection.md for the full architecture.
+
+on:
+  push:
+    branches: [main, master, feat/*]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        # Default fetch-depth=1 — we only scan the current working tree,
+        # NOT the full git history, so old committed secrets don't keep
+        # firing alerts on every run.
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ML dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install scikit-learn numpy scipy
+
+      - name: Train ML Classifier Model (Stage 2a)
+        run: |
+          python train_secret_classifier.py
+
+      - name: Run Gitleaks Scan (Stage 1 - Deterministic Engine)
+        run: |
+          # Download and execute the standalone Gitleaks binary.
+          GITLEAKS_VERSION=v8.18.2
+          wget -q https://github.com/gitleaks/gitleaks/releases/download/${GITLEAKS_VERSION}/gitleaks_8.18.2_linux_x64.tar.gz
+          tar -zxvf gitleaks_8.18.2_linux_x64.tar.gz
+          # `detect --no-git` scans only the current working tree (no git
+          # history), so previously-committed secrets don't re-fire.
+          # `|| true` keeps the job alive so the AI filter can decide.
+          ./gitleaks detect --source . --config .gitleaks.toml --no-git --verbose --report-format json --report-path=gitleaks-report.json || true
+          echo "---- Gitleaks raw report ----"
+          if [ -f gitleaks-report.json ]; then
+            cat gitleaks-report.json
+          else
+            echo "No findings (report file not created)."
+          fi
+
+      - name: Run Contextual AI Filter (Stage 2b - ML Inference)
+        run: |
+          python filter_secrets.py gitleaks-report.json
+
+      - name: Upload scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secret-scan-reports
+          path: |
+            gitleaks-report.json
+            secret-scan-verdict.json
+            secret-scan-report.html
+          retention-days: 30
